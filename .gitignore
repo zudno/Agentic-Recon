@@ -1,0 +1,24 @@
+# Build artifacts
+bin/
+# "go build ./..." writes the single main package to the repo root
+/recon
+/recon.exe
+
+# Real engagement scope — contains client names/IPs (never commit)
+scope.yaml
+
+# Local campaign databases and evidence
+*.db
+*.sqlite
+data/
+logs/
+evidence/
+
+# Secrets never live in files
+*.key
+.env
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp

@@ -1,0 +1,45 @@
+# scope.example.yaml — plantilla del contrato de engagement.
+# El scope.yaml REAL va GITIGNORED (nombra activos del cliente).
+# Cada clave admite el mismo nombre en env vars con prefijo AR_ en R1+.
+
+authorization:
+  reference: "ROE-2026-011-firma"     # OBLIGATORIO: id del RoE firmado.
+                                      # Sin esto, la campaña se niega a arrancar.
+  window:                            # la campaña no corre fuera de esta ventana
+    start: 2026-11-01T00:00:00Z
+    end:   2026-11-30T23:59:59Z
+
+scope:
+  domains:            # dominios raíz autorizados (los subdominios derivan)
+    - example.com
+    - example.org
+  ips:                # rangos autorizados explícitos (CIDR o individuales)
+    - 203.0.113.0/24
+  exclude:            # exclusión dura — SIEMPRE gana sobre domains/ips
+    - partner.example.com
+    - 203.0.113.7
+  sources:            # terceros consultables (allow-list: ausente = prohibido)
+    - crt.sh
+    - dns-resolver
+    # - virustotal    # ejemplo de fuente deshabilitada a propósito
+
+policy:
+  risk_levels:        # clases habilitadas en esta campaña
+    - PASSIVE
+    - LOW_IMPACT
+    # - INTRUSIVE    # requiere RoE + approval gate por acción (R4)
+  rate:
+    requests_per_second: 5      # global de campaña
+    per_host_per_second: 1      # por target
+    jitter_ms: 750              # ± spread aleatorio entre requests
+  noise_profile: "purple-team"   # perfil acordado con el cliente (documental)
+
+budgets:
+  agent_max_steps_per_hypothesis: 8
+  campaign_max_tokens: 2000000
+
+llm:                  # OPCIONAL — sin esta sección el triaje es manual
+  provider: "anthropic"          # anthropic | openai-compatible
+  model: "claude-sonnet-4-20250514"
+  api_key_env: "AR_LLM_API_KEY"  # NOMBRE de la env var — la key nunca va en el archivo
+  # base_url: "https://..."      # para proveedores compatible-openai propios
