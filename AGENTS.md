@@ -50,10 +50,16 @@ in-scope alternative instead of implementing it.
 
 ## Project status
 
-Greenfield. R0 (skeleton + quality gates) lands first; the README §14 roadmap
-defines the build order — policy engine (R1) and store (R2) before any
-pipeline (R3), and **no LLM before R5**. Update this file when reality drifts
-(prefer opencode's `/init` or edit in place rather than rewriting wholesale).
+R0 and R1 are landed. R0: skeleton, contract, quality gates. R1: the
+deterministic policy engine — scope.yaml validation (authorization.reference
+mandatory, mixed domain/IP exclusions, sources allow-list, risk levels),
+dual token-bucket rate limiter with jitter, the egress choke point
+(injectable Egress, DefaultEgress is the only net/http client in the
+codebase — enforced by TestNativeEgressOnlyInPolicy), and evidence-everything
+via request_log sinks (JSONL + memory; the store-backed sink lands in R2).
+INTRUSIVE fails closed until the approval gate arrives in R4. Next: R2, the
+SQLite store with the asset state machine (README §14). Update this file when
+reality drifts (prefer opencode's `/init` or edit in place).
 
 ---
 
@@ -94,8 +100,9 @@ Agentic-Recon/
 # Environment
 go version                 # Go 1.23+
 
-# CLI skeleton (R0)
-go run ./cmd/recon help
+# CLI (R1): scaffold and validate the signed contract
+go run ./cmd/recon init --scope scope.yaml
+go run ./cmd/recon run --scope scope.yaml
 
 # Quality gates — run these before declaring a task done
 gofmt -l .                 # must print nothing
