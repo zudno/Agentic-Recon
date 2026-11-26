@@ -887,19 +887,29 @@ func cmdScanNetwork(args []string) {
 		fatalf("%v", err)
 	}
 
-	// Summary
+	// Summary with banners
 	ips, _ := st.ListAssets(ctx, store.ListFilter{CampaignID: cid, Kind: store.KindIP, Limit: 1000})
 	ws, _ := st.ListAssets(ctx, store.ListFilter{CampaignID: cid, Kind: store.KindWebService, Limit: 1000})
 	fmt.Fprintf(os.Stderr, "recon: %d live host(s) discovered, %d web service(s) found\n", len(ips), len(ws))
 	if len(ips) > 0 {
 		fmt.Println()
+		fmt.Printf("%-16s %-30s %s\n", "host", "ports", "banners / services")
 		for _, ip := range ips {
 			ports, _ := ip.Attrs["open_ports"].([]any)
-			fmt.Printf("  %s", ip.Value)
-			if len(ports) > 0 {
-				fmt.Printf("  ports: %v", ports)
+			fmt.Printf("%-16s %-30v", ip.Value, ports)
+			// Show captured banners from observations.
+			obs, _ := st.ObservationsOf(ctx, ip.ID)
+			var banners []string
+			for _, o := range obs {
+				if banner, ok := o.Attrs["banner"]; ok && fmt.Sprintf("%v", banner) != "" {
+					port := o.Attrs["port"]
+					banners = append(banners, fmt.Sprintf("[%v] %v", port, banner))
+				} else if svc, ok := o.Attrs["service"]; ok {
+					port := o.Attrs["port"]
+					banners = append(banners, fmt.Sprintf("[%v] %v", port, svc))
+				}
 			}
-			fmt.Println()
+			fmt.Printf(" %s\n", strings.Join(banners, " | "))
 		}
 	}
 	fmt.Fprintf(os.Stderr, "\nrecon: triage with \"recon triage list --db %s --campaign %d\"\n", *dbPath, cid)

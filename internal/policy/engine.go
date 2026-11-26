@@ -3,6 +3,7 @@ package policy
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -40,9 +41,26 @@ type Egress func(ctx context.Context, r *HTTPRequest) (*HTTPResponse, error)
 // DefaultEgress is the ONLY net/http client in the codebase (README §6.1 —
 // enforced by TestNativeEgressOnlyInPolicy). Redirects are recorded, not
 // followed; bodies are capped at 1 MiB; the user agent is honest by design.
+// Self-signed certificates are rejected unless the scope explicitly opts
+// in with policy.allow_self_signed (typical for internal network scans).
 func DefaultEgress() Egress {
+	return DefaultEgressOpt(false)
+}
+
+// DefaultEgressOpt builds the egress with optional self-signed certificate
+// acceptance for internal network use.
+func DefaultEgressOpt(allowSelfSigned bool) Egress {
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if allowSelfSigned {
+		// Internal networks often run old TLS (1.0/1.1) with self-signed
+		// certificates — the operator opted in through the scope contract.
+		tlsCfg.InsecureSkipVerify = true
+		tlsCfg.MinVersion = tls.VersionTLS10
+	}
+	transport := &http.Transport{TLSClientConfig: tlsCfg}
 	client := &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout:   30 * time.Second,
+		Transport: transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -182,7 +200,7 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		return nil, errors.New("policy: sink is required — evidence-everything is not optional")
 	}
 	if cfg.Egress == nil {
-		cfg.Egress = DefaultEgress()
+		cfg.Egress = DefaultEgressOpt(cfg.Scope.Policy.AllowSelfSigned)
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now

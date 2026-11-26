@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"agenticrecon/internal/policy"
@@ -44,19 +45,15 @@ func NewSpecialistAgent(actor string, tb *toolbox.Toolbox, client Client, scope 
 	return &SpecialistAgent{Actor: actor, tb: tb, client: client, budget: NewBudget(scope)}
 }
 
-const specialistSystem = `You are a specialist investigator in an AUTHORIZED security assessment with a signed scope. You investigate ONE bounded task about ONE in-scope asset, using ONLY the provided tools — every request you make is policy-checked, paced, and evidence-logged. You have a limited number of steps; do not waste them.
+const specialistSystem = `You are a specialist investigator in an AUTHORIZED security assessment with a signed scope. You investigate ONE bounded task about ONE in-scope asset, using ONLY the provided tools. You have a limited number of steps.
 
-CRITICAL OUTPUT FORMAT: Your FINAL message must be ONLY a raw JSON object — no markdown, no code fences, no explanation before or after. Start with { and end with }. The JSON schema is:
-{"verdict":"validated"|"discarded","severity":"high"|"medium"|"low"|"info","reasoning":"one sentence"}
-
-Example of a valid final response:
-{"verdict":"discarded","severity":"info","reasoning":"Standard IIS default page with no interesting attack surface."}
+HOW TO FINISH: When your investigation is complete, you MUST call the submit_conclusion tool with your verdict. Do NOT write your conclusion as text — always use the submit_conclusion tool.
 
 Rules:
 - "validated" REQUIRES concrete evidence from tool results of THIS run (statuses, endpoints found, exposed documentation). No evidence → "discarded".
 - Be conservative: you are prioritizing attack-surface paths for a human operator, not claiming exploits.
 - Never invent URLs outside the asset's host; the policy engine will deny them anyway.
-- When you are done investigating, STOP calling tools and output ONLY the JSON.`
+- Start by reading the asset's details and observations with get_asset_details and get_observations, then probe with http_request, and finish with submit_conclusion.`
 
 // Run executes the loop for one investigation. On abort (budget, steps,
 // context) the asset is released back to TRIAGED for another run.
@@ -120,8 +117,35 @@ func (a *SpecialistAgent) Run(ctx context.Context, inv Investigation) (Outcome, 
 			out.Verdict = "aborted"
 			return finish("aborted")
 		}
+		// Check for the submit_conclusion tool — the model's structured exit.
+		for _, call := range assistant.ToolCalls {
+			if call.Name == "submit_conclusion" {
+				var c conclusion
+				if err := json.Unmarshal([]byte(call.Arguments), &c); err == nil && c.Verdict != "" {
+					out.Verdict = c.Verdict
+					out.Severity = c.Severity
+					out.Reasoning = c.Reasoning
+					switch {
+					case c.Verdict == "validated" && len(out.Evidence) == 0:
+						out.Verdict = "discarded"
+						return finish("discarded")
+					case c.Verdict == "validated":
+						f, ferr := a.tb.PromoteToFinding(ctx, asset.ID, out.HypothesisID, c.Severity, out.Evidence)
+						if ferr != nil {
+							out.Verdict = "aborted"
+							return finish("aborted")
+						}
+						out.FindingID = f.ID
+						return finish("validated")
+					default:
+						return finish("discarded")
+					}
+				}
+			}
+		}
+
+		// Text-only response (no tool calls) — try parsing as a conclusion.
 		if len(assistant.ToolCalls) == 0 {
-			// Final conclusion.
 			c, ok := parseConclusion(assistant.Text)
 			out.Verdict = c.Verdict
 			out.Severity = c.Severity
@@ -131,8 +155,6 @@ func (a *SpecialistAgent) Run(ctx context.Context, inv Investigation) (Outcome, 
 				out.Verdict = "aborted"
 				return finish("aborted")
 			case c.Verdict == "validated" && len(out.Evidence) == 0:
-				// Evidence-gated: a validation with no evidence gathered this
-				// run is a discarded, not a finding.
 				out.Verdict = "discarded"
 				return finish("discarded")
 			case c.Verdict == "validated":
@@ -151,10 +173,13 @@ func (a *SpecialistAgent) Run(ctx context.Context, inv Investigation) (Outcome, 
 		msgs = append(msgs, Msg{Role: "assistant", Text: assistant.Text, ToolCalls: assistant.ToolCalls})
 		var results []ToolResult
 		for _, call := range assistant.ToolCalls {
+			if call.Name == "submit_conclusion" {
+				// Already handled above — shouldn't reach here.
+				results = append(results, ToolResult{CallID: call.ID, Content: "(already processed)", IsError: false})
+				continue
+			}
 			content, evidence, derr := a.dispatch(ctx, call)
 			out.Evidence = append(out.Evidence, evidence...)
-			// The Anthropic API rejects empty content when is_error is true —
-			// always give the model something to read.
 			if derr != nil && content == "" {
 				content = fmt.Sprintf("tool error: %v", derr)
 			}
@@ -193,15 +218,37 @@ func (a *SpecialistAgent) dispatch(ctx context.Context, call ToolCall) (string, 
 		}
 		return a.marshal(a.tb.CheckCVEDetails(ctx, a.Actor, args.Reason, args.CVE))
 	case "get_asset_details":
-		var args struct{ ID int64 }
+		var args map[string]any
 		if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
 			return "", nil, err
 		}
-		asset, err := a.tb.GetAssetDetails(ctx, args.ID)
+		id, err := parseAssetID(args["id"])
+		if err != nil {
+			return "", nil, err
+		}
+		asset, err := a.tb.GetAssetDetails(ctx, id)
 		if err != nil {
 			return "", nil, err
 		}
 		b, _ := json.Marshal(asset)
+		return string(b), nil, nil
+	case "get_observations":
+		// Returns the raw observations (banners, port data) captured by
+		// the network scan. The ID may arrive as int or string depending
+		// on the model — handle both.
+		var args map[string]any
+		if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
+			return "", nil, err
+		}
+		id, err := parseAssetID(args["id"])
+		if err != nil {
+			return "", nil, err
+		}
+		obs, err := a.tb.Store.ObservationsOf(ctx, id)
+		if err != nil {
+			return "", nil, err
+		}
+		b, _ := json.Marshal(obs)
 		return string(b), nil, nil
 	case "search_by_tech":
 		var args struct{ Tech string }
@@ -241,8 +288,22 @@ func specialistTools() []ToolDef {
 	str := func(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
 	return []ToolDef{
 		{
+			Name:        "submit_conclusion",
+			Description: "REQUIRED to finish: submit your final verdict. You MUST call this tool instead of writing a text conclusion.",
+			Schema: obj(map[string]any{
+				"verdict":   map[string]any{"type": "string", "enum": []any{"validated", "discarded"}, "description": "your verdict"},
+				"severity":  map[string]any{"type": "string", "enum": []any{"high", "medium", "low", "info"}, "description": "severity if validated"},
+				"reasoning": str("one concrete sentence backed by evidence"),
+			}, "verdict", "severity", "reasoning"),
+		},
+		{
 			Name:        "get_asset_details",
 			Description: "Full details of one asset in the campaign store.",
+			Schema:      obj(map[string]any{"id": str("asset id")}, "id"),
+		},
+		{
+			Name:        "get_observations",
+			Description: "Raw observations for one asset — service banners (SSH versions, HTTP servers), port details, and protocol info captured by the network scan. Use this to see what services are running before probing.",
 			Schema:      obj(map[string]any{"id": str("asset id")}, "id"),
 		},
 		{
@@ -318,4 +379,19 @@ func extractJSON(text string) ([]byte, bool) {
 		return nil, false
 	}
 	return []byte(text[start : end+1]), true
+}
+
+// parseAssetID accepts an asset id as int64, float64 (JSON number), or
+// string — LLMs pass tool arguments in inconsistent types.
+func parseAssetID(v any) (int64, error) {
+	switch id := v.(type) {
+	case float64:
+		return int64(id), nil
+	case string:
+		return strconv.ParseInt(id, 10, 64)
+	case json.Number:
+		return id.Int64()
+	default:
+		return 0, fmt.Errorf("cannot parse asset id from %T (%v)", v, v)
+	}
 }

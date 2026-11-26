@@ -73,6 +73,10 @@ type PolicyConfig struct {
 	RiskLevels   []RiskLevel `yaml:"risk_levels"`
 	Rate         RateConfig  `yaml:"rate"`
 	NoiseProfile string      `yaml:"noise_profile"`
+	// AllowSelfSigned permits HTTPS connections to hosts with self-signed
+	// or otherwise untrusted certificates — typical on internal networks.
+	// The operator opts in explicitly through the scope contract.
+	AllowSelfSigned bool `yaml:"allow_self_signed"`
 }
 
 // Budgets bound agent loops (README §10).
