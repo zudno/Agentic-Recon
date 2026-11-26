@@ -46,13 +46,17 @@ func NewSpecialistAgent(actor string, tb *toolbox.Toolbox, client Client, scope 
 
 const specialistSystem = `You are a specialist investigator in an AUTHORIZED security assessment with a signed scope. You investigate ONE bounded task about ONE in-scope asset, using ONLY the provided tools — every request you make is policy-checked, paced, and evidence-logged. You have a limited number of steps; do not waste them.
 
-When your investigation is complete, reply with ONLY a JSON object, no other text:
-{"verdict":"validated"|"discarded","severity":"high"|"medium"|"low"|"info","reasoning":"<concrete, evidence-backed summary>"}
+CRITICAL OUTPUT FORMAT: Your FINAL message must be ONLY a raw JSON object — no markdown, no code fences, no explanation before or after. Start with { and end with }. The JSON schema is:
+{"verdict":"validated"|"discarded","severity":"high"|"medium"|"low"|"info","reasoning":"one sentence"}
+
+Example of a valid final response:
+{"verdict":"discarded","severity":"info","reasoning":"Standard IIS default page with no interesting attack surface."}
 
 Rules:
 - "validated" REQUIRES concrete evidence from tool results of THIS run (statuses, endpoints found, exposed documentation). No evidence → "discarded".
 - Be conservative: you are prioritizing attack-surface paths for a human operator, not claiming exploits.
-- Never invent URLs outside the asset's host; the policy engine will deny them anyway.`
+- Never invent URLs outside the asset's host; the policy engine will deny them anyway.
+- When you are done investigating, STOP calling tools and output ONLY the JSON.`
 
 // Run executes the loop for one investigation. On abort (budget, steps,
 // context) the asset is released back to TRIAGED for another run.
@@ -149,6 +153,14 @@ func (a *SpecialistAgent) Run(ctx context.Context, inv Investigation) (Outcome, 
 		for _, call := range assistant.ToolCalls {
 			content, evidence, derr := a.dispatch(ctx, call)
 			out.Evidence = append(out.Evidence, evidence...)
+			// The Anthropic API rejects empty content when is_error is true —
+			// always give the model something to read.
+			if derr != nil && content == "" {
+				content = fmt.Sprintf("tool error: %v", derr)
+			}
+			if content == "" {
+				content = "(no output)"
+			}
 			results = append(results, ToolResult{CallID: call.ID, Content: content, IsError: derr != nil})
 		}
 		msgs = append(msgs, Msg{Role: "user", ToolResults: results})
