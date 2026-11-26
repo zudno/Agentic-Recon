@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"os/user"
 	"path/filepath"
@@ -58,6 +59,8 @@ func main() {
 		cmdAgents(os.Args[2:])
 	case "report":
 		cmdReport(os.Args[2:])
+	case "wrappers":
+		cmdWrappers(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "recon: unknown command %q\n\n", os.Args[1])
 		usage()
@@ -721,6 +724,28 @@ func cmdReport(args []string) {
 	}
 }
 
+// ─── wrappers (R7 tool wrappers) ────────────────────────────────────────────
+
+// cmdWrappers shows which external tools are available and how to install
+// the missing ones. The pipeline uses them opportunistically — absent
+// wrappers are skipped gracefully, and the native modules always cover the
+// baseline.
+func cmdWrappers(_ []string) {
+	fmt.Fprintf(os.Stderr, "recon: known wrappers (native modules cover the baseline):\n\n")
+	for _, w := range pipeline.Registry() {
+		status := "MISSING"
+		if path, err := exec.LookPath(w.Binary); err == nil {
+			status = "found at " + path
+		}
+		fmt.Fprintf(os.Stderr, "  %-12s %s\n", w.Name, status)
+		fmt.Fprintf(os.Stderr, "               %s\n", w.Description)
+		if status == "MISSING" {
+			fmt.Fprintf(os.Stderr, "               install: %s\n", w.Install)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "\n  wrappers run inside RunPassive automatically when present.\n")
+}
+
 // ─── misc ──────────────────────────────────────────────────────────────────
 
 func notImplemented(cmd, phase string) {
@@ -747,6 +772,7 @@ Commands:
   probe-dir            content discovery behind the approval gate            [R4]
   agents triage|investigate  LLM-assisted triage and specialist loops    [R5]
   report               export the engagement report (md/json)                [R6]
+  wrappers             show available external tools (subfinder, dnsx)      [R7]
   version              print the version
 
 Every network action goes through the policy engine (README §6).

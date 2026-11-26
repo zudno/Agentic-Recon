@@ -196,6 +196,24 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 	}, nil
 }
 
+// PreFlightTargets validates a full target list before invoking a wrapper
+// binary (README §6.1): the engine checks that every host in the list is
+// inside the signed scope. This is the first of the three enforcement
+// layers for wrapped tools — the binary's own rate flags and the
+// persistence-layer scope check complete the gauntlet.
+func (e *Engine) PreFlightTargets(ctx context.Context, hosts []string) error {
+	for _, h := range hosts {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" {
+			continue
+		}
+		if e.scope.HostVerdict(h) != ScopeIn {
+			return fmt.Errorf("policy: pre-flight — %s is not inside the signed scope", h)
+		}
+	}
+	return nil
+}
+
 // Check returns the verdict for a request without executing or logging it.
 // It never consumes approvals — consumption belongs to the executing tool.
 func (e *Engine) Check(req *Request) Verdict {
