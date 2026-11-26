@@ -155,7 +155,7 @@ func (c *anthropicClient) Complete(ctx context.Context, system string, msgs []Ms
 	}
 	payload := map[string]any{
 		"model":      c.model,
-		"max_tokens": 2048,
+		"max_tokens": 16384,
 		"messages":   anthropicMessages(msgs),
 	}
 	if system != "" {

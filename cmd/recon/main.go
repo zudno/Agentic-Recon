@@ -67,6 +67,10 @@ func main() {
 		cmdCrawl(os.Args[2:])
 	case "scan-network":
 		cmdScanNetwork(os.Args[2:])
+	case "classify":
+		cmdClassify(os.Args[2:])
+	case "infra":
+		cmdInfra(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "recon: unknown command %q\n\n", os.Args[1])
 		usage()
@@ -915,6 +919,114 @@ func cmdScanNetwork(args []string) {
 	fmt.Fprintf(os.Stderr, "\nrecon: triage with \"recon triage list --db %s --campaign %d\"\n", *dbPath, cid)
 }
 
+// ─── classify (R9 network topology) ────────────────────────────────────────
+
+// cmdClassify runs host classification on all discovered IP assets and
+// displays the network topology by role.
+func cmdClassify(args []string) {
+	fs := flag.NewFlagSet("classify", flag.ContinueOnError)
+	dbPath := openStoreFlag(fs)
+	campaign := fs.Int64("campaign", 0, "campaign id (default: latest)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	cid := resolveCampaign(fs, st, campaign)
+
+	classifications, err := pipeline.ClassifyHosts(ctx, st, cid)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	fmt.Fprintf(os.Stderr, "recon: network topology (campaign %d):\n\n", cid)
+	// Print by role, most critical first
+	roleOrder := []string{"windows-server", "router", "network-device", "linux-server", "linux-host", "windows-workstation", "web-service", "unknown"}
+	for _, role := range roleOrder {
+		hosts, ok := classifications[role]
+		if !ok || len(hosts) == 0 {
+			continue
+		}
+		fmt.Printf("  %-20s %v\n", role, hosts)
+	}
+	fmt.Fprintf(os.Stderr, "\nrecon: run \"recon infra\" for the LLM analysis\n")
+}
+
+// ─── infra (R9 Infrastructure Specialist) ────────────────────────────────
+
+// cmdInfra runs the Infrastructure Specialist Agent: reads all hosts,
+// banners, and observations from the store, and produces a prioritized
+// attack surface analysis in ONE LLM call.
+func cmdInfra(args []string) {
+	fs := flag.NewFlagSet("infra", flag.ContinueOnError)
+	scopePath := fs.String("scope", "scope.yaml", "signed scope contract")
+	dbPath := openStoreFlag(fs)
+	campaign := fs.Int64("campaign", 0, "campaign id (default: latest)")
+	format := fs.String("format", "text", "output format: text | json")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	scope, err := policy.Load(*scopePath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	cid := resolveCampaign(fs, st, campaign)
+	eng, err := policy.NewEngine(policy.EngineConfig{Scope: scope, Sink: st.Sink(cid), Approvals: st})
+	if err != nil {
+		fatalf("%v", err)
+	}
+	client, err := agent.NewClient(scope)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	tb := toolbox.New(scope, eng, st, cid)
+	infra := agent.NewInfrastructureAgent("agent:infra", tb, client, scope)
+
+	report, err := infra.Run(ctx)
+	if err != nil {
+		fatalf("%v", err)
+	}
+
+	if *format == "json" {
+		b, _ := json.MarshalIndent(report, "", "  ")
+		fmt.Println(string(b))
+		return
+	}
+
+	// Human-readable output
+	fmt.Fprintf(os.Stderr, "\n%s\n\n", report.Summary)
+	fmt.Println("NETWORK MAP:")
+	for _, h := range report.NetworkMap {
+		fmt.Printf("  %-16s %-20s risk=%-8s", h.Host, h.Role, h.RiskLevel)
+		if h.SSHBanner != "" {
+			fmt.Printf("  ssh=%s", h.SSHBanner)
+		}
+		fmt.Println()
+	}
+	fmt.Println("\nATTACK PATHS:")
+	for _, ap := range report.AttackPaths {
+		fmt.Printf("  [%s] %s\n", ap.RiskLevel, ap.Description)
+		for _, step := range ap.Steps {
+			fmt.Printf("    → %s\n", step)
+		}
+	}
+	fmt.Println("\nPRIORITIES:")
+	for i, p := range report.Priorities {
+		fmt.Printf("  %d. [%s] %s (%s)\n", i+1, p.Severity, p.Finding, p.Host)
+		fmt.Printf("     %s\n", p.Reasoning)
+	}
+	fmt.Fprintf(os.Stderr, "\nrecon: infrastructure analysis complete (%d tokens)\n", report.TokensUsed)
+}
+
 // ─── misc ──────────────────────────────────────────────────────────────────
 
 func notImplemented(cmd, phase string) {
@@ -945,6 +1057,8 @@ Commands:
   scan-ports           naabu port scan behind the approval gate              [R7]
   crawl                katana web crawl behind the approval gate             [R7]
   scan-network         discover live hosts on CIDR ranges (netscan)         [R8]
+  classify            classify hosts by role (router/server/workstation)   [R9]
+  infra               Infrastructure Specialist: full-campaign LLM analysis [R9]
   version              print the version
 
 Every network action goes through the policy engine (README §6).

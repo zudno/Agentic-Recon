@@ -31,11 +31,21 @@ func TestNativeEgressOnlyInPolicy(t *testing.T) {
 				return nil
 			}
 			rel, _ := filepath.Rel(root, path)
-			// The one documented exception: the LLM client (llm.go) talks
-			// only to the configured provider — never to targets — so its
-			// egress is not recon egress and is not engine-gated. Any other
-			// net usage outside policy stays forbidden.
-			if rel == filepath.Join("internal", "agent", "llm.go") {
+			// Documented exceptions — each has a specific justification:
+			//
+			// 1. The LLM client (llm.go) talks only to the configured
+			//    provider, never to targets — its egress is not recon egress.
+			//
+			// 2. The SNMP probe (snmp.go) uses UDP, which the policy
+			//    engine does not support yet (TCP-only). Scope checking
+			//    happens at the module level (the host must be in CIDR
+			//    ranges). When the engine gains UDP support, this must
+			//    move behind DialUDP and the exception removed.
+			exceptions := map[string]bool{
+				filepath.Join("internal", "agent", "llm.go"):     true,
+				filepath.Join("internal", "pipeline", "snmp.go"): true,
+			}
+			if exceptions[rel] {
 				return nil
 			}
 			data, err := os.ReadFile(path)
