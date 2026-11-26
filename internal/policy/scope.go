@@ -223,6 +223,12 @@ func (s *Scope) InWindow(t time.Time) bool {
 	return !t.Before(w.Start) && !t.After(w.End)
 }
 
+// RootDomains returns the normalized authorized root domains — the bases
+// the passive pipeline enumerates from.
+func (s *Scope) RootDomains() []string {
+	return append([]string(nil), s.domains...)
+}
+
 // RiskEnabled reports whether the campaign allows the given risk level.
 func (s *Scope) RiskEnabled(r RiskLevel) bool { return s.risks[r] }
 

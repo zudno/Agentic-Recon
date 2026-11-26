@@ -50,19 +50,22 @@ in-scope alternative instead of implementing it.
 
 ## Project status
 
-R0–R2 are landed. R0: skeleton, contract, quality gates. R1: the deterministic
-policy engine — scope.yaml validation (authorization.reference mandatory,
-mixed domain+IP exclusions, sources allow-list, risk levels), dual
-token-bucket rate limiter with jitter, and the egress choke point
+R0–R3 are landed. R0: skeleton, contract, quality gates. R1: the
+deterministic policy engine — scope.yaml validation (authorization.reference
+mandatory, mixed domain+IP exclusions, sources allow-list, risk levels),
+dual token-bucket rate limiter with jitter, and the egress choke point
 (DefaultEgress is the only net/http client — enforced by
 TestNativeEgressOnlyInPolicy). R2: the SQLite store (modernc.org/sqlite,
-pure-Go, CGO_ENABLED=0 intact) — versioned schema (campaigns, assets,
-asset_links, observations, hypotheses, findings, request_log), the asset
-state machine with terminal OUT_OF_SCOPE (invisible to every default
-listing, sticky across re-discovery), and the store-backed request_log sink.
-Campaigns pause and resume across reopens with every state intact. Next:
-R3, the passive pipeline (README §14). Update this file when reality drifts
-(prefer opencode's `/init` or edit in place).
+pure-Go, CGO_ENABLED=0 intact) — versioned schema, the asset state machine
+with terminal OUT_OF_SCOPE, and the store-backed request_log sink;
+campaigns pause and resume across reopens. R3: the passive pipeline —
+ct-subdomains (PASSIVE source query via the engine) and http-probe
+(LOW_IMPACT, https→http fallback, dead hosts recorded once), both writing
+assets/links/observations through the store; `recon run` creates or resumes
+campaigns (scope-hash pinned), interrupts pause the campaign, and
+`recon campaigns` + `recon triage list|show|mark` deliver manual triage
+without any LLM. Next: R4, the toolbox + approval gate (README §14). Update
+this file when reality drifts (prefer opencode's `/init` or edit in place).
 
 ---
 
