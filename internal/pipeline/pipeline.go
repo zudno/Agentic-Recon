@@ -37,7 +37,19 @@ func RunPassive(ctx context.Context, scope *policy.Scope, eng *policy.Engine, st
 		}
 	}
 
-	return HTTPProbe(ctx, eng, st, campaignID)
+	if err := HTTPProbe(ctx, eng, st, campaignID); err != nil {
+		return err
+	}
+
+	// httpx enrichment: adds tech detection and richer attrs when available.
+	if err := HTTPx(ctx, scope, eng, st, campaignID); err != nil {
+		if isNotInstalled(err) {
+			_ = err
+		} else {
+			return fmt.Errorf("httpx wrapper: %w", err)
+		}
+	}
+	return nil
 }
 
 // isNotInstalled reports whether a wrapper error is just "binary missing".

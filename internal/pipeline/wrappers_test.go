@@ -10,22 +10,37 @@ import (
 )
 
 func TestAvailableDetectsBinaries(t *testing.T) {
-	// On any machine some tools are absent — the map must simply reflect PATH.
 	avail := Available()
 	if len(avail) != len(registry) {
 		t.Fatalf("available = %v, want %d entries", avail, len(registry))
 	}
-	for name := range avail {
-		found := false
-		for _, w := range registry {
-			if w.Name == name {
-				found = true
-				break
-			}
+	for _, w := range registry {
+		if _, ok := avail[w.Name]; !ok {
+			t.Fatalf("wrapper %q missing from availability map", w.Name)
 		}
-		if !found {
-			t.Fatalf("unknown wrapper %q in availability map", name)
+	}
+}
+
+func TestExtractHostFromURL(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"https://api.example.com/path", "api.example.com"},
+		{"http://www.example.com", "www.example.com"},
+		{"https://sub.example.com:8080/x", "sub.example.com"},
+		{"not-a-url", "not-a-url"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := extractHostFromURL(tc.in); got != tc.want {
+			t.Errorf("extractHostFromURL(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestToStrings(t *testing.T) {
+	in := []any{"a", "b", 42, "c"}
+	out := toStrings(in)
+	if len(out) != 3 || out[0] != "a" || out[2] != "c" {
+		t.Fatalf("toStrings = %v", out)
 	}
 }
 

@@ -61,6 +61,10 @@ func main() {
 		cmdReport(os.Args[2:])
 	case "wrappers":
 		cmdWrappers(os.Args[2:])
+	case "scan-ports":
+		cmdScanPorts(os.Args[2:])
+	case "crawl":
+		cmdCrawl(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "recon: unknown command %q\n\n", os.Args[1])
 		usage()
@@ -746,6 +750,105 @@ func cmdWrappers(_ []string) {
 	fmt.Fprintf(os.Stderr, "\n  wrappers run inside RunPassive automatically when present.\n")
 }
 
+// ─── scan-ports / crawl (R7 INTRUSIVE wrappers) ─────────────────────────────
+
+// cmdScanPorts runs naabu against one host behind the approval gate:
+// without --approval it files a PENDING request and stops; after the
+// operator resolves it, rerun with --approval <token>.
+func cmdScanPorts(args []string) {
+	fs := flag.NewFlagSet("scan-ports", flag.ContinueOnError)
+	scopePath := fs.String("scope", "scope.yaml", "signed scope contract")
+	dbPath := openStoreFlag(fs)
+	host := fs.String("host", "", "host to scan (required, must be in scope)")
+	approval := fs.String("approval", "", "operator-approved token (from recon approve)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	if *host == "" {
+		fatalf("--host is required (e.g. api.example.com)")
+	}
+	scope, err := policy.Load(*scopePath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	cid := resolveCampaign(fs, st, fs.Int64("campaign", 0, "campaign id"))
+	eng, err := policy.NewEngine(policy.EngineConfig{Scope: scope, Sink: st.Sink(cid), Approvals: st})
+	if err != nil {
+		fatalf("%v", err)
+	}
+
+	if *approval == "" {
+		appr, err := st.RequestApproval(ctx, cid, "naabu", *host,
+			"port scan requested via CLI", operatorIdentity())
+		if err != nil {
+			fatalf("%v", err)
+		}
+		fmt.Fprintf(os.Stderr, "recon: approval %s PENDING — naabu against %s\n", appr.Token, appr.Target)
+		fmt.Fprintf(os.Stderr, "  resolve with: recon approve %s --yes --db %s\n", appr.Token, *dbPath)
+		fmt.Fprintf(os.Stderr, "  then rerun: recon scan-ports --host %s --approval %s\n", *host, appr.Token)
+		return
+	}
+
+	if err := pipeline.Naabu(ctx, scope, eng, st, cid, *host, *approval); err != nil {
+		fatalf("%v", err)
+	}
+	fmt.Fprintf(os.Stderr, "recon: naabu scan of %s complete (approval %s consumed)\n", *host, *approval)
+}
+
+// cmdCrawl runs katana against one URL behind the approval gate.
+func cmdCrawl(args []string) {
+	fs := flag.NewFlagSet("crawl", flag.ContinueOnError)
+	scopePath := fs.String("scope", "scope.yaml", "signed scope contract")
+	dbPath := openStoreFlag(fs)
+	url := fs.String("url", "", "base URL to crawl (required, must be in scope)")
+	approval := fs.String("approval", "", "operator-approved token (from recon approve)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	if *url == "" {
+		fatalf("--url is required (e.g. https://api.example.com)")
+	}
+	scope, err := policy.Load(*scopePath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	cid := resolveCampaign(fs, st, fs.Int64("campaign", 0, "campaign id"))
+	eng, err := policy.NewEngine(policy.EngineConfig{Scope: scope, Sink: st.Sink(cid), Approvals: st})
+	if err != nil {
+		fatalf("%v", err)
+	}
+
+	host := hostOfURL(*url)
+	if *approval == "" {
+		appr, err := st.RequestApproval(ctx, cid, "katana", host,
+			"web crawl requested via CLI", operatorIdentity())
+		if err != nil {
+			fatalf("%v", err)
+		}
+		fmt.Fprintf(os.Stderr, "recon: approval %s PENDING — katana against %s\n", appr.Token, appr.Target)
+		fmt.Fprintf(os.Stderr, "  resolve with: recon approve %s --yes --db %s\n", appr.Token, *dbPath)
+		fmt.Fprintf(os.Stderr, "  then rerun: recon crawl --url %s --approval %s\n", *url, appr.Token)
+		return
+	}
+
+	if err := pipeline.Katana(ctx, scope, eng, st, cid, *url, *approval); err != nil {
+		fatalf("%v", err)
+	}
+	fmt.Fprintf(os.Stderr, "recon: katana crawl of %s complete (approval %s consumed)\n", *url, *approval)
+}
+
 // ─── misc ──────────────────────────────────────────────────────────────────
 
 func notImplemented(cmd, phase string) {
@@ -772,7 +875,9 @@ Commands:
   probe-dir            content discovery behind the approval gate            [R4]
   agents triage|investigate  LLM-assisted triage and specialist loops    [R5]
   report               export the engagement report (md/json)                [R6]
-  wrappers             show available external tools (subfinder, dnsx)      [R7]
+  wrappers             show available external tools                          [R7]
+  scan-ports           naabu port scan behind the approval gate              [R7]
+  crawl                katana web crawl behind the approval gate             [R7]
   version              print the version
 
 Every network action goes through the policy engine (README §6).

@@ -42,6 +42,24 @@ var registry = []Wrapper{
 		Description: "DNS resolution and enumeration (all record types, CNAME chains, brute-force)",
 		Install:     "go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest",
 	},
+	{
+		Name:        "httpx",
+		Binary:      "httpx",
+		Description: "Enhanced web probing: tech detection, concurrent fingerprinting, CDN/wildcard detection",
+		Install:     "go install github.com/projectdiscovery/httpx/cmd/httpx@latest",
+	},
+	{
+		Name:        "naabu",
+		Binary:      "naabu",
+		Description: "Port scanning: SYN scan, service detection on non-standard ports (INTRUSIVE — approval required)",
+		Install:     "go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest",
+	},
+	{
+		Name:        "katana",
+		Binary:      "katana",
+		Description: "Web crawling: deep endpoint discovery, forms, parameters (INTRUSIVE — approval required)",
+		Install:     "go install github.com/projectdiscovery/katana/cmd/katana@latest",
+	},
 }
 
 // Available reports which wrapper binaries are on PATH.

@@ -12,6 +12,14 @@ import (
 	"agenticrecon/internal/store"
 )
 
+// errTestNotInstalled makes wrapper tests hermetic: even when the tools are
+// installed on the dev machine, tests never invoke real binaries.
+type testErr string
+
+func (e testErr) Error() string { return string(e) }
+
+var errTestNotInstalled = testErr("not found on PATH — hermetic tests never invoke wrappers")
+
 const ctFixture = `[
   {"common_name":"api.example.com","name_value":"api.example.com"},
   {"common_name":"*.example.com","name_value":"www.example.com\napi.example.com"},
@@ -67,6 +75,13 @@ budgets:
 
 func setup(t *testing.T, eg policy.Egress) (*policy.Scope, *policy.Engine, *store.Store, int64) {
 	t.Helper()
+	// Wrappers must be hermetic in tests: even when the binaries are
+	// installed on the developer's machine, tests never invoke them
+	// (safe-test skill — zero third parties). Force "not installed".
+	origLook := execLookPath
+	execLookPath = func(string) (string, error) { return "", errTestNotInstalled }
+	t.Cleanup(func() { execLookPath = origLook })
+
 	scope, err := policy.Parse([]byte(testScopeYAML(t)))
 	if err != nil {
 		t.Fatalf("parse scope: %v", err)
