@@ -50,22 +50,26 @@ in-scope alternative instead of implementing it.
 
 ## Project status
 
-R0 and R1 are landed. R0: skeleton, contract, quality gates. R1: the
-deterministic policy engine — scope.yaml validation (authorization.reference
-mandatory, mixed domain/IP exclusions, sources allow-list, risk levels),
-dual token-bucket rate limiter with jitter, the egress choke point
-(injectable Egress, DefaultEgress is the only net/http client in the
-codebase — enforced by TestNativeEgressOnlyInPolicy), and evidence-everything
-via request_log sinks (JSONL + memory; the store-backed sink lands in R2).
-INTRUSIVE fails closed until the approval gate arrives in R4. Next: R2, the
-SQLite store with the asset state machine (README §14). Update this file when
-reality drifts (prefer opencode's `/init` or edit in place).
+R0–R2 are landed. R0: skeleton, contract, quality gates. R1: the deterministic
+policy engine — scope.yaml validation (authorization.reference mandatory,
+mixed domain+IP exclusions, sources allow-list, risk levels), dual
+token-bucket rate limiter with jitter, and the egress choke point
+(DefaultEgress is the only net/http client — enforced by
+TestNativeEgressOnlyInPolicy). R2: the SQLite store (modernc.org/sqlite,
+pure-Go, CGO_ENABLED=0 intact) — versioned schema (campaigns, assets,
+asset_links, observations, hypotheses, findings, request_log), the asset
+state machine with terminal OUT_OF_SCOPE (invisible to every default
+listing, sticky across re-discovery), and the store-backed request_log sink.
+Campaigns pause and resume across reopens with every state intact. Next:
+R3, the passive pipeline (README §14). Update this file when reality drifts
+(prefer opencode's `/init` or edit in place).
 
 ---
 
 ## Stack & layout
 
-- **Language:** Go 1.23+ (standard library first).
+- **Language:** Go 1.26+ (standard library first; the floor is set by
+  modernc.org/sqlite).
 - **Allowed dependencies (pinned):** `gopkg.in/yaml.v3` (scope.yaml — stdlib
   has no YAML) and `modernc.org/sqlite` (pure-Go SQLite: keeps `CGO_ENABLED=0`
   and cross-compilation intact). Anything else needs explicit justification.
@@ -98,7 +102,7 @@ Agentic-Recon/
 
 ```bash
 # Environment
-go version                 # Go 1.23+
+go version                 # Go 1.26+
 
 # CLI (R1): scaffold and validate the signed contract
 go run ./cmd/recon init --scope scope.yaml

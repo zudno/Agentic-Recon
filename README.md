@@ -91,7 +91,7 @@ acordado — no existe para ocultarse de un dueño que no autorizó la prueba.
 
 | Aspecto | Valor |
 |---|---|
-| Lenguaje | Go 1.23+ (stdlib-first) |
+| Lenguaje | Go 1.26+ (stdlib-first; el piso lo fija `modernc.org/sqlite`) |
 | Dependencias externas | **Mínimas y justificadas**: `gopkg.in/yaml.v3` (scope.yaml — stdlib no trae YAML), `modernc.org/sqlite` (SQLite pure-Go, mantiene `CGO_ENABLED=0` y el cross-compile). Nada más. |
 | LLM | Vía REST con `net/http` (Anthropic o API compatible-OpenAI) — sin SDKs, sin deps extra |
 | Base de datos | SQLite (archivo por campaña o único con `campaign_id`) |
