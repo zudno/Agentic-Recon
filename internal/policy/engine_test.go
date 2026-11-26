@@ -123,21 +123,86 @@ func TestDoDeniedRiskNotEnabled(t *testing.T) {
 	}
 }
 
-func TestDoIntrusiveFailsClosedUntilR4(t *testing.T) {
+func TestDoIntrusiveFailsClosedWithoutGate(t *testing.T) {
 	eg := &fakeEgress{}
 	doc := strings.Replace(defaultScopeYAML,
 		"risk_levels: [PASSIVE, LOW_IMPACT]",
 		"risk_levels: [PASSIVE, LOW_IMPACT, INTRUSIVE]", 1)
-	eng, _ := newTestEngine(t, doc, eg.do)
+	eng, _ := newTestEngine(t, doc, eg.do) // no Approvals configured
 
 	req := targetReq("https://api.example.com/", RiskIntrusive)
-	req.ApprovalID = "forged-approval" // even a claimed approval must not pass
+	req.ApprovalID = "forged-approval" // a claimed approval must not pass
 	_, v, err := eng.Do(context.Background(), req)
-	if err == nil || v.Allowed || !strings.Contains(v.Reason, "R4") {
+	if err == nil || v.Allowed || !strings.Contains(v.Reason, "approval gate") {
 		t.Fatalf("verdict = %+v", v)
 	}
 	if len(eg.calls) != 0 {
-		t.Fatal("intrusive action must not reach the egress before R4")
+		t.Fatal("intrusive action must not reach the egress without a gate")
+	}
+}
+
+// fakeApprovals is a controllable policy.Approvals for engine tests.
+type fakeApprovals struct {
+	token string
+	tool  string
+	host  string
+	valid bool
+}
+
+func (f *fakeApprovals) ValidateApproval(_ context.Context, token, tool, host string) error {
+	if token == f.token && tool == f.tool && host == f.host && f.valid {
+		return nil
+	}
+	return errors.New("no matching APPROVED approval")
+}
+
+func (f *fakeApprovals) ConsumeApproval(context.Context, string, string, string) error {
+	return nil
+}
+
+func TestDoIntrusiveApprovalFlow(t *testing.T) {
+	eg := &fakeEgress{resp: &HTTPResponse{Status: 200}}
+	doc := strings.Replace(defaultScopeYAML,
+		"risk_levels: [PASSIVE, LOW_IMPACT]",
+		"risk_levels: [PASSIVE, LOW_IMPACT, INTRUSIVE]", 1)
+	scope := mustParse(t, doc)
+	sink := &MemSink{}
+	eng, err := NewEngine(EngineConfig{
+		Scope: scope, Sink: sink, Egress: eg.do,
+		Approvals: &fakeApprovals{token: "appr-good", tool: "dir-probe", host: "api.example.com", valid: true},
+		Now:       func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) },
+		JitterFn:  func() time.Duration { return 0 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Missing token → denied.
+	_, v, err := eng.Do(context.Background(), targetReq("https://api.example.com/", RiskIntrusive))
+	if err == nil || v.Allowed || !strings.Contains(v.Reason, "approval token") {
+		t.Fatalf("verdict = %+v", v)
+	}
+
+	// A valid (tool, host) approval lets the INTRUSIVE request through —
+	// and the log line carries the token for the audit trail.
+	req := targetReq("https://api.example.com/", RiskIntrusive)
+	req.Tool = "dir-probe"
+	req.ApprovalID = "appr-good"
+	resp, v, err := eng.Do(context.Background(), req)
+	if err != nil || !v.Allowed || resp.Status != 200 {
+		t.Fatalf("verdict = %+v err = %v", v, err)
+	}
+	if sink.Entries[sink.Len()-1].ApprovedBy != "appr-good" {
+		t.Fatalf("entry = %+v", sink.Entries[sink.Len()-1])
+	}
+
+	// Mismatched host → the gate rejects.
+	req2 := targetReq("https://www.example.com/", RiskIntrusive)
+	req2.Tool = "dir-probe"
+	req2.ApprovalID = "appr-good"
+	_, v, err = eng.Do(context.Background(), req2)
+	if err == nil || v.Allowed || !strings.Contains(v.Reason, "approval rejected") {
+		t.Fatalf("verdict = %+v", v)
 	}
 }
 
@@ -151,9 +216,9 @@ func TestDoSourceQueryAllowed(t *testing.T) {
 		Reason: "enumerate subdomains",
 		Risk:   RiskPassive,
 		Source: &SourceRequest{
-			Source: "crt.sh",
-			Domain: "example.com",
-			URL:    "https://crt.sh/?q=example.com",
+			Source:  "crt.sh",
+			Subject: "example.com",
+			URL:     "https://crt.sh/?q=example.com",
 		},
 	})
 	if err != nil || !v.Allowed || resp.Status != 200 {
@@ -173,7 +238,7 @@ func TestDoSourceQueryNotAllowedSource(t *testing.T) {
 
 	req := &Request{
 		Actor: "module:ct-subdomains", Tool: "ct-subdomains", Risk: RiskPassive,
-		Source: &SourceRequest{Source: "virustotal", Domain: "example.com", URL: "https://x/"},
+		Source: &SourceRequest{Source: "virustotal", Subject: "example.com", URL: "https://x/"},
 	}
 	_, v, err := eng.Do(context.Background(), req)
 	if err == nil || v.Allowed || !strings.Contains(v.Reason, "allow-list") {
@@ -190,7 +255,7 @@ func TestDoSourceQueryAboutOutOfScopeDomain(t *testing.T) {
 
 	req := &Request{
 		Actor: "module:ct-subdomains", Tool: "ct-subdomains", Risk: RiskPassive,
-		Source: &SourceRequest{Source: "crt.sh", Domain: "other.com", URL: "https://crt.sh/?q=other.com"},
+		Source: &SourceRequest{Source: "crt.sh", Subject: "other.com", URL: "https://crt.sh/?q=other.com"},
 	}
 	_, v, err := eng.Do(context.Background(), req)
 	if err == nil || v.Allowed || !strings.Contains(v.Reason, "signed scope") {

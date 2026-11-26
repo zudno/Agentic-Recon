@@ -50,7 +50,7 @@ in-scope alternative instead of implementing it.
 
 ## Project status
 
-R0–R3 are landed. R0: skeleton, contract, quality gates. R1: the
+R0–R4 are landed. R0: skeleton, contract, quality gates. R1: the
 deterministic policy engine — scope.yaml validation (authorization.reference
 mandatory, mixed domain+IP exclusions, sources allow-list, risk levels),
 dual token-bucket rate limiter with jitter, and the egress choke point
@@ -59,13 +59,17 @@ TestNativeEgressOnlyInPolicy). R2: the SQLite store (modernc.org/sqlite,
 pure-Go, CGO_ENABLED=0 intact) — versioned schema, the asset state machine
 with terminal OUT_OF_SCOPE, and the store-backed request_log sink;
 campaigns pause and resume across reopens. R3: the passive pipeline —
-ct-subdomains (PASSIVE source query via the engine) and http-probe
-(LOW_IMPACT, https→http fallback, dead hosts recorded once), both writing
-assets/links/observations through the store; `recon run` creates or resumes
-campaigns (scope-hash pinned), interrupts pause the campaign, and
-`recon campaigns` + `recon triage list|show|mark` deliver manual triage
-without any LLM. Next: R4, the toolbox + approval gate (README §14). Update
-this file when reality drifts (prefer opencode's `/init` or edit in place).
+ct-subdomains and http-probe through the engine; `recon run` (scope-hash
+pinned, Ctrl-C pauses), `recon campaigns`, and manual triage
+(list|show|mark) with no LLM. R4: the approval gate and the typed toolbox —
+INTRUSIVE actions need an operator-resolved approval bound to (token, tool,
+host), consumed exactly once per logical action (dir-probe is the R4
+proof); the toolbox catalog adds http_request, fetch_js_and_extract_routes,
+check_cve_details (NVD reference subject — public knowledge, still
+allow-listed), read tools over the store, and hypothesis/finding recording;
+`recon approve list|<token> --yes|--no` and `recon probe-dir` wire it for
+operators. Next: R5, the LLM agents (README §14). Update this file when
+reality drifts (prefer opencode's `/init` or edit in place).
 
 ---
 

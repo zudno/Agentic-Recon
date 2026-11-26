@@ -11,8 +11,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -22,6 +24,7 @@ import (
 	"agenticrecon/internal/pipeline"
 	"agenticrecon/internal/policy"
 	"agenticrecon/internal/store"
+	"agenticrecon/internal/toolbox"
 )
 
 const version = "0.1.0"
@@ -45,8 +48,9 @@ func main() {
 	case "triage":
 		cmdTriage(os.Args[2:])
 	case "approve":
-		// R4: resolve pending INTRUSIVE approval requests.
-		notImplemented("approve", "R4")
+		cmdApprove(os.Args[2:])
+	case "probe-dir":
+		cmdProbeDir(os.Args[2:])
 	case "report":
 		// R6: export the engagement report (md/json) from the store.
 		notImplemented("report", "R6")
@@ -403,6 +407,159 @@ func cmdTriageMark(args []string) {
 	fmt.Fprintf(os.Stderr, "recon: asset %d (%s) is now %s\n", id, updated.Value, updated.State)
 }
 
+// ─── approve (R4 approval gate) ─────────────────────────────────────────────
+
+func operatorIdentity() string {
+	host, _ := os.Hostname()
+	if u, err := user.Current(); err == nil {
+		return u.Username + "@" + host
+	}
+	return "operator@" + host
+}
+
+func cmdApprove(args []string) {
+	if len(args) == 0 {
+		fatalf("usage: recon approve list | recon approve <token> --yes|--no [--by name]")
+	}
+	if args[0] == "list" {
+		cmdApproveList(args[1:])
+		return
+	}
+	fs := flag.NewFlagSet("approve", flag.ContinueOnError)
+	dbPath := openStoreFlag(fs)
+	yes := fs.Bool("yes", false, "approve the request")
+	no := fs.Bool("no", false, "reject the request")
+	by := fs.String("by", "", "operator identity for the audit trail (default: user@host)")
+	if err := fs.Parse(args[1:]); err != nil {
+		os.Exit(2)
+	}
+	if *yes == *no {
+		fatalf("exactly one of --yes or --no is required")
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	defer st.Close()
+	decidedBy := *by
+	if decidedBy == "" {
+		decidedBy = operatorIdentity()
+	}
+	appr, err := st.ResolveApproval(context.Background(), args[0], *yes, decidedBy)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	fmt.Fprintf(os.Stderr, "recon: approval %s for %s against %s is now %s (by %s)\n",
+		appr.Token, appr.Tool, appr.Target, appr.State, appr.DecidedBy)
+}
+
+func cmdApproveList(args []string) {
+	fs := flag.NewFlagSet("approve list", flag.ContinueOnError)
+	dbPath := openStoreFlag(fs)
+	campaign := fs.Int64("campaign", 0, "campaign id (default: latest)")
+	all := fs.Bool("all", false, "list every approval, not only pending")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	defer st.Close()
+	cid := resolveCampaign(fs, st, campaign)
+	list, err := st.ListApprovals(context.Background(), cid, !*all)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	if len(list) == 0 {
+		fmt.Fprintln(os.Stderr, "recon: no pending approval requests")
+		return
+	}
+	fmt.Printf("%-22s %-10s %-28s %-14s %s\n", "token", "state", "tool", "target", "reason")
+	for _, a := range list {
+		fmt.Printf("%-22s %-10s %-28s %-14s %s\n", a.Token, a.State, a.Tool, a.Target, a.Reason)
+	}
+}
+
+// ─── probe-dir (R4 INTRUSIVE action) ────────────────────────────────────────
+
+// cmdProbeDir runs content discovery against one in-scope host behind the
+// approval gate: without --approval it files a PENDING request and stops;
+// after the operator resolves it, rerun with --approval <token>.
+func cmdProbeDir(args []string) {
+	fs := flag.NewFlagSet("probe-dir", flag.ContinueOnError)
+	scopePath := fs.String("scope", "scope.yaml", "signed scope contract")
+	dbPath := openStoreFlag(fs)
+	campaign := fs.Int64("campaign", 0, "campaign id (default: latest)")
+	baseURL := fs.String("url", "", "base URL to probe (required)")
+	approval := fs.String("approval", "", "operator-approved token (from recon approve)")
+	words := fs.String("words", "", "comma-separated paths (default: built-in list)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	if *baseURL == "" {
+		fatalf("--url is required (e.g. https://api.example.com)")
+	}
+	scope, err := policy.Load(*scopePath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	cid := resolveCampaign(fs, st, campaign)
+	eng, err := policy.NewEngine(policy.EngineConfig{Scope: scope, Sink: st.Sink(cid), Approvals: st})
+	if err != nil {
+		fatalf("%v", err)
+	}
+	tb := toolbox.New(scope, eng, st, cid)
+	caller := operatorIdentity()
+
+	if *approval == "" {
+		host := hostOfURL(*baseURL)
+		appr, err := tb.RequestApproval(ctx, caller, "dir-probe", host,
+			"content discovery requested via CLI")
+		if err != nil {
+			fatalf("%v", err)
+		}
+		fmt.Fprintf(os.Stderr, "recon: approval %s PENDING — %s against %s\n", appr.Token, appr.Tool, appr.Target)
+		fmt.Fprintf(os.Stderr, "  resolve with: recon approve %s --yes --db %s\n", appr.Token, *dbPath)
+		fmt.Fprintf(os.Stderr, "  then rerun this command adding: --approval %s\n", appr.Token)
+		return
+	}
+
+	var wordList []string
+	for _, w := range strings.Split(*words, ",") {
+		if w = strings.TrimSpace(w); w != "" {
+			wordList = append(wordList, w)
+		}
+	}
+	res := tb.DirProbe(ctx, caller, "content discovery via CLI", *baseURL, wordList, *approval)
+	fmt.Fprintln(os.Stderr, "recon:", res.Summary)
+	if !res.OK {
+		os.Exit(1)
+	}
+	for _, ev := range res.EvidenceIDs {
+		fmt.Printf("evidence: request_log id %d\n", ev)
+	}
+	if found, ok := res.Data["found"].([]map[string]any); ok {
+		for _, f := range found {
+			fmt.Printf("found: %v (status %v)\n", f["path"], f["status"])
+		}
+	}
+}
+
+func hostOfURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	return strings.ToLower(u.Hostname())
+}
+
 // ─── misc ──────────────────────────────────────────────────────────────────
 
 func notImplemented(cmd, phase string) {
@@ -425,7 +582,8 @@ Commands:
   run                  execute the passive pipeline behind the policy engine  [R3]
   campaigns            list campaigns in the database                        [R3]
   triage list|show|mark manual triage over the store — no LLM required       [R3]
-  approve              resolve pending INTRUSIVE approval requests           [R4]
+  approve list|<token>  the INTRUSIVE approval gate: queue + y/n (auditado) [R4]
+  probe-dir            content discovery behind the approval gate            [R4]
   report               export the engagement report (md/json)                 [R6]
   version              print the version
 

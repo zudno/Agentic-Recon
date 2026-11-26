@@ -41,7 +41,7 @@ func migrate(db *sql.DB) error {
 }
 
 // migrations holds the schema history; index i is version i+1.
-var migrations = []string{migrationV1}
+var migrations = []string{migrationV1, migrationV2}
 
 const migrationV1 = `
 CREATE TABLE campaigns (
@@ -118,4 +118,25 @@ CREATE TABLE request_log (
 	approved_by TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX idx_request_log_campaign ON request_log(campaign_id, id);
+`
+
+// migrationV2 adds the approval gate (R4): every INTRUSIVE action needs a
+// PENDING approval resolved by the operator before the engine lets it
+// through, and the executing tool consumes it exactly once.
+const migrationV2 = `
+CREATE TABLE approvals (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	token TEXT NOT NULL UNIQUE,
+	campaign_id INTEGER NOT NULL REFERENCES campaigns(id),
+	tool TEXT NOT NULL,
+	target TEXT NOT NULL,
+	reason TEXT NOT NULL,
+	requested_by TEXT NOT NULL,
+	state TEXT NOT NULL DEFAULT 'PENDING',
+	decided_by TEXT NOT NULL DEFAULT '',
+	decided_at TEXT,
+	consumed_at TEXT,
+	created_at TEXT NOT NULL
+);
+CREATE INDEX idx_approvals_campaign_state ON approvals(campaign_id, state);
 `

@@ -32,9 +32,9 @@ func CTSubdomains(ctx context.Context, scope *policy.Scope, eng *policy.Engine, 
 			Reason: "enumerate subdomains via Certificate Transparency",
 			Risk:   policy.RiskPassive,
 			Source: &policy.SourceRequest{
-				Source: "crt.sh",
-				Domain: root,
-				URL:    "https://crt.sh/?q=" + url.QueryEscape("%."+root) + "&output=json",
+				Source:  "crt.sh",
+				Subject: root,
+				URL:     "https://crt.sh/?q=" + url.QueryEscape("%."+root) + "&output=json",
 			},
 		})
 		if err != nil {

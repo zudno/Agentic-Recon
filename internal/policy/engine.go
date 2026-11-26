@@ -101,15 +101,39 @@ type Request struct {
 	ApprovalID string
 }
 
-// SourceRequest queries an allowed third-party source about an in-scope
-// asset (README §5: sources are an allow-list).
+// SourceRequest queries an allowed third-party source (README §5: sources
+// are an allow-list). Subject is the query's subject: the in-scope asset
+// for host-bound sources (crt.sh, dns-resolver), or a public reference id —
+// a CVE — for reference sources (nvd), which carry nothing about the
+// target.
 type SourceRequest struct {
 	Source  string
-	Domain  string
+	Subject string
 	Method  string
 	URL     string
 	Headers map[string]string
 	Body    []byte
+}
+
+// sourceSubjects classifies how the engine validates each known source's
+// subject. Unknown sources default to "host" — the strictest rule: their
+// subjects must be in scope.
+var sourceSubjects = map[string]string{
+	"crt.sh":       "host",
+	"dns-resolver": "host",
+	"nvd":          "reference",
+}
+
+// Approvals validates operator approvals for INTRUSIVE actions
+// (README §6.2). Approvals bind (token, tool, host) and are consumed by
+// the executing tool — one approval, one logical action. The
+// store-backed implementation ships in R4; a nil gate fails closed.
+type Approvals interface {
+	// ValidateApproval reports whether the token approves this tool+host
+	// without consuming it (checked on every request of a logical action).
+	ValidateApproval(ctx context.Context, token, tool, host string) error
+	// ConsumeApproval atomically marks the token used.
+	ConsumeApproval(ctx context.Context, token, tool, host string) error
 }
 
 // Verdict is the engine's decision for one request.
@@ -128,21 +152,24 @@ func (e *ErrDenied) Error() string { return "policy: " + e.Reason }
 // Engine is the deterministic choke point: check, pace, execute, and log —
 // in that order, every time (README §6).
 type Engine struct {
-	scope   *Scope
-	limiter *Limiter
-	sink    Sink
-	egress  Egress
-	now     func() time.Time
+	scope     *Scope
+	limiter   *Limiter
+	sink      Sink
+	egress    Egress
+	approvals Approvals
+	now       func() time.Time
 }
 
 // EngineConfig wires an engine. Scope and Sink are mandatory —
-// evidence-everything is not optional.
+// evidence-everything is not optional. Approvals is nil = the INTRUSIVE
+// gate fails closed.
 type EngineConfig struct {
-	Scope    *Scope
-	Sink     Sink
-	Egress   Egress
-	Now      func() time.Time
-	JitterFn func() time.Duration
+	Scope     *Scope
+	Sink      Sink
+	Egress    Egress
+	Approvals Approvals
+	Now       func() time.Time
+	JitterFn  func() time.Duration
 }
 
 // NewEngine validates the configuration and compiles the rate limiter.
@@ -160,20 +187,22 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		cfg.Now = time.Now
 	}
 	return &Engine{
-		scope:   cfg.Scope,
-		limiter: NewLimiter(cfg.Scope.Policy.Rate, cfg.Now, cfg.JitterFn),
-		sink:    cfg.Sink,
-		egress:  cfg.Egress,
-		now:     cfg.Now,
+		scope:     cfg.Scope,
+		limiter:   NewLimiter(cfg.Scope.Policy.Rate, cfg.Now, cfg.JitterFn),
+		sink:      cfg.Sink,
+		egress:    cfg.Egress,
+		approvals: cfg.Approvals,
+		now:       cfg.Now,
 	}, nil
 }
 
 // Check returns the verdict for a request without executing or logging it.
+// It never consumes approvals — consumption belongs to the executing tool.
 func (e *Engine) Check(req *Request) Verdict {
-	return e.check(req)
+	return e.check(context.Background(), req)
 }
 
-func (e *Engine) check(req *Request) Verdict {
+func (e *Engine) check(ctx context.Context, req *Request) Verdict {
 	deny := func(reason string, sv ScopeVerdict) Verdict {
 		return Verdict{Allowed: false, Reason: reason, Scope: sv, Risk: req.Risk}
 	}
@@ -193,9 +222,18 @@ func (e *Engine) check(req *Request) Verdict {
 		return deny(fmt.Sprintf("risk level %s is not enabled in policy.risk_levels", req.Risk), ScopeOut)
 	}
 	if req.Risk == RiskIntrusive {
-		// Fail closed until the approval gate lands in R4: no intrusive
-		// action may execute, with or without a claimed approval id.
-		return deny("INTRUSIVE actions require the approval gate (lands in R4)", ScopeOut)
+		// The approval gate (README §6.2): without a configured gate, or
+		// without a token the gate validates for this tool+host, the
+		// action is refused. Fail closed.
+		if e.approvals == nil {
+			return deny("INTRUSIVE actions require the approval gate — none configured", ScopeOut)
+		}
+		if req.ApprovalID == "" {
+			return deny("INTRUSIVE actions require an operator approval token (recon approve)", ScopeOut)
+		}
+		if err := e.approvals.ValidateApproval(ctx, req.ApprovalID, req.Tool, e.hostKey(req)); err != nil {
+			return deny("approval rejected: "+err.Error(), ScopeOut)
+		}
 	}
 	switch {
 	case req.Target != nil:
@@ -212,10 +250,12 @@ func (e *Engine) check(req *Request) Verdict {
 		if !e.scope.SourceAllowed(req.Source.Source) {
 			return deny(fmt.Sprintf("source %q is not in the sources allow-list", req.Source.Source), ScopeOut)
 		}
-		sv := e.scope.HostVerdict(req.Source.Domain)
-		if sv != ScopeIn {
-			return deny(fmt.Sprintf("source query about %s — the asset is %s the signed scope",
-				req.Source.Domain, scopePhrase(sv)), sv)
+		if sourceSubjects[strings.ToLower(req.Source.Source)] != "reference" {
+			sv := e.scope.HostVerdict(req.Source.Subject)
+			if sv != ScopeIn {
+				return deny(fmt.Sprintf("source query about %s — the asset is %s the signed scope",
+					req.Source.Subject, scopePhrase(sv)), sv)
+			}
 		}
 		return Verdict{Allowed: true, Scope: ScopeIn, Risk: req.Risk}
 	default:
@@ -225,8 +265,10 @@ func (e *Engine) check(req *Request) Verdict {
 
 // Do runs one request through the full gauntlet: check → pace → egress →
 // log. Denied and paced-out attempts are logged too — evidence-everything.
+// Do validates (but never consumes) approvals; consumption belongs to the
+// executing tool, once per logical action.
 func (e *Engine) Do(ctx context.Context, req *Request) (*HTTPResponse, Verdict, error) {
-	v := e.check(req)
+	v := e.check(ctx, req)
 	label := e.targetLabel(req)
 	if !v.Allowed {
 		if err := e.log(ctx, req, v, label, "denied:"+v.Reason); err != nil {
@@ -274,7 +316,7 @@ func (e *Engine) targetLabel(req *Request) string {
 		return req.Target.Method + " " + req.Target.URL
 	}
 	if req.Source != nil {
-		return req.Source.Source + " query about " + req.Source.Domain
+		return req.Source.Source + " query about " + req.Source.Subject
 	}
 	return ""
 }
