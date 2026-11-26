@@ -50,7 +50,7 @@ in-scope alternative instead of implementing it.
 
 ## Project status
 
-R0–R5 are landed. R0: skeleton, contract, quality gates. R1: the
+R0–R6 are landed. R0: skeleton, contract, quality gates. R1: the
 deterministic policy engine — scope.yaml validation (authorization.reference
 mandatory, mixed domain+IP exclusions, sources allow-list, risk levels),
 dual token-bucket rate limiter with jitter, and the egress choke point
@@ -74,7 +74,11 @@ state), and the specialist ReAct loop (closed typed-tool catalog, hard
 step + token budgets, evidence-gated conclusions — "validated" without
 evidence gathered this run is discarded); `recon agents triage|investigate`
 wires both. The system remains fully usable with no LLM configured (manual
-triage). Next: R6, the engagement report (README §14). Update this file when
+triage). R6: the engagement report — `recon report --format md|json` builds
+the full document from the store (scope summary with exclusions, validated
+inventory, severity-ordered findings with their origin hypotheses and
+evidence-backed request_log rows, and the complete action trail); every
+finding traces to the exact log lines that back it. Update this file when
 reality drifts (prefer opencode's `/init` or edit in place).
 
 ---

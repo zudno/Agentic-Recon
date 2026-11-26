@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"agenticrecon/internal/agent"
 	"agenticrecon/internal/pipeline"
 	"agenticrecon/internal/policy"
+	"agenticrecon/internal/report"
 	"agenticrecon/internal/store"
 	"agenticrecon/internal/toolbox"
 )
@@ -55,8 +57,7 @@ func main() {
 	case "agents":
 		cmdAgents(os.Args[2:])
 	case "report":
-		// R6: export the engagement report (md/json) from the store.
-		notImplemented("report", "R6")
+		cmdReport(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "recon: unknown command %q\n\n", os.Args[1])
 		usage()
@@ -667,6 +668,59 @@ func cmdAgentsInvestigate(args []string) {
 	}
 }
 
+// ─── report (R6 engagement report) ──────────────────────────────────────────
+
+// cmdReport exports the engagement report (README §12) from the store:
+// the scope summary with exclusions, the validated inventory, the
+// prioritized findings with their evidence, and the complete action log —
+// all reconstructed from request_log.
+func cmdReport(args []string) {
+	fs := flag.NewFlagSet("report", flag.ContinueOnError)
+	dbPath := openStoreFlag(fs)
+	campaign := fs.Int64("campaign", 0, "campaign id (default: latest)")
+	format := fs.String("format", "md", "output format: md | json")
+	out := fs.String("out", "", "output file (default: stdout)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	defer st.Close()
+	cid := resolveCampaign(fs, st, campaign)
+	rep, err := report.Build(context.Background(), st, cid)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	switch strings.ToLower(*format) {
+	case "md", "markdown":
+		if *out == "" {
+			fmt.Print(rep.Markdown())
+		} else {
+			if err := os.WriteFile(*out, []byte(rep.Markdown()), 0o600); err != nil {
+				fatalf("%v", err)
+			}
+			fmt.Fprintf(os.Stderr, "recon: report written to %s\n", *out)
+		}
+	case "json":
+		b, err := json.MarshalIndent(rep, "", "  ")
+		if err != nil {
+			fatalf("%v", err)
+		}
+		if *out == "" {
+			fmt.Println(string(b))
+		} else {
+			if err := os.WriteFile(*out, b, 0o600); err != nil {
+				fatalf("%v", err)
+			}
+			fmt.Fprintf(os.Stderr, "recon: report written to %s\n", *out)
+		}
+	default:
+		fatalf("unknown format %q (md | json)", *format)
+	}
+}
+
 // ─── misc ──────────────────────────────────────────────────────────────────
 
 func notImplemented(cmd, phase string) {
@@ -692,7 +746,7 @@ Commands:
   approve list|<token>  the INTRUSIVE approval gate: queue + y/n (auditado) [R4]
   probe-dir            content discovery behind the approval gate            [R4]
   agents triage|investigate  LLM-assisted triage and specialist loops    [R5]
-  report               export the engagement report (md/json)                 [R6]
+  report               export the engagement report (md/json)                [R6]
   version              print the version
 
 Every network action goes through the policy engine (README §6).

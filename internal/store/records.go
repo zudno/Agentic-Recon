@@ -219,6 +219,40 @@ func (s *Store) AddFinding(ctx context.Context, campaignID, assetID, hypothesisI
 	}, nil
 }
 
+// GetHypothesis fetches one hypothesis by id (the report joins findings
+// back to their origin).
+func (s *Store) GetHypothesis(ctx context.Context, id int64) (Hypothesis, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, campaign_id, asset_id, created_by, reasoning, score, created_at
+		 FROM hypotheses WHERE id = ?`, id)
+	var h Hypothesis
+	var createdAt string
+	if err := row.Scan(&h.ID, &h.CampaignID, &h.AssetID, &h.CreatedBy,
+		&h.Reasoning, &h.Score, &createdAt); err != nil {
+		return Hypothesis{}, fmt.Errorf("get hypothesis: %w", err)
+	}
+	h.CreatedAt, _ = parseTimeRFC(createdAt)
+	return h, nil
+}
+
+// GetRequestLogByID fetches one request_log row — the evidence backbone of
+// findings and the report.
+func (s *Store) GetRequestLogByID(ctx context.Context, id int64) (LogRow, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, campaign_id, ts, actor, tool, target, risk, scope, allowed, reason, result, approved_by
+		 FROM request_log WHERE id = ?`, id)
+	var r LogRow
+	var ts string
+	var allowed int
+	if err := row.Scan(&r.ID, &r.CampaignID, &ts, &r.Actor, &r.Tool, &r.Target,
+		&r.Risk, &r.Scope, &allowed, &r.Reason, &r.Result, &r.ApprovedBy); err != nil {
+		return LogRow{}, fmt.Errorf("get request_log %d: %w", id, err)
+	}
+	r.TS, _ = parseTimeRFC(ts)
+	r.Allowed = allowed == 1
+	return r, nil
+}
+
 // ListFindings returns a campaign's findings, oldest first.
 func (s *Store) ListFindings(ctx context.Context, campaignID int64) ([]Finding, error) {
 	rows, err := s.db.QueryContext(ctx,
