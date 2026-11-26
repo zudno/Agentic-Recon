@@ -65,6 +65,8 @@ func main() {
 		cmdScanPorts(os.Args[2:])
 	case "crawl":
 		cmdCrawl(os.Args[2:])
+	case "scan-network":
+		cmdScanNetwork(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "recon: unknown command %q\n\n", os.Args[1])
 		usage()
@@ -849,6 +851,60 @@ func cmdCrawl(args []string) {
 	fmt.Fprintf(os.Stderr, "recon: katana crawl of %s complete (approval %s consumed)\n", *url, *approval)
 }
 
+// ─── scan-network (R8 network discovery) ────────────────────────────────────
+
+// cmdScanNetwork discovers live hosts on the CIDR ranges in scope.ips.
+// Every probe goes through the policy engine: scope-checked, paced, and
+// evidence-logged. Dead hosts are skipped silently; live hosts become ip
+// assets with their open ports and service banners as observations.
+func cmdScanNetwork(args []string) {
+	fs := flag.NewFlagSet("scan-network", flag.ContinueOnError)
+	scopePath := fs.String("scope", "scope.yaml", "signed scope contract")
+	dbPath := openStoreFlag(fs)
+	campaign := fs.Int64("campaign", 0, "campaign id (default: latest)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	scope, err := policy.Load(*scopePath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	cid := resolveCampaign(fs, st, campaign)
+	eng, err := policy.NewEngine(policy.EngineConfig{Scope: scope, Sink: st.Sink(cid), Approvals: st})
+	if err != nil {
+		fatalf("%v", err)
+	}
+
+	hosts := scope.CIDRHosts(256)
+	fmt.Fprintf(os.Stderr, "recon: scanning %d host(s) from CIDR ranges in scope.ips…\n", len(hosts))
+	if err := pipeline.Netscan(ctx, scope, eng, st, cid); err != nil {
+		fatalf("%v", err)
+	}
+
+	// Summary
+	ips, _ := st.ListAssets(ctx, store.ListFilter{CampaignID: cid, Kind: store.KindIP, Limit: 1000})
+	ws, _ := st.ListAssets(ctx, store.ListFilter{CampaignID: cid, Kind: store.KindWebService, Limit: 1000})
+	fmt.Fprintf(os.Stderr, "recon: %d live host(s) discovered, %d web service(s) found\n", len(ips), len(ws))
+	if len(ips) > 0 {
+		fmt.Println()
+		for _, ip := range ips {
+			ports, _ := ip.Attrs["open_ports"].([]any)
+			fmt.Printf("  %s", ip.Value)
+			if len(ports) > 0 {
+				fmt.Printf("  ports: %v", ports)
+			}
+			fmt.Println()
+		}
+	}
+	fmt.Fprintf(os.Stderr, "\nrecon: triage with \"recon triage list --db %s --campaign %d\"\n", *dbPath, cid)
+}
+
 // ─── misc ──────────────────────────────────────────────────────────────────
 
 func notImplemented(cmd, phase string) {
@@ -878,6 +934,7 @@ Commands:
   wrappers             show available external tools                          [R7]
   scan-ports           naabu port scan behind the approval gate              [R7]
   crawl                katana web crawl behind the approval gate             [R7]
+  scan-network         discover live hosts on CIDR ranges (netscan)         [R8]
   version              print the version
 
 Every network action goes through the policy engine (README §6).

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -369,6 +370,173 @@ func hostOf(rawURL string) (string, error) {
 		return "", fmt.Errorf("no host in URL %q", rawURL)
 	}
 	return strings.ToLower(host), nil
+}
+
+// ─── raw TCP egress (network scanning) ─────────────────────────────────────
+
+// TCPRequest is one raw TCP connection attempt through the policy engine —
+// the network-scanning counterpart of the HTTP Request (README §6). Host
+// discovery and port probing flow through the same gauntlet: scope, risk,
+// pacing, and evidence logging.
+type TCPRequest struct {
+	Actor      string
+	Tool       string
+	Reason     string
+	Campaign   string
+	Risk       RiskLevel
+	Host       string
+	Port       int
+	Timeout    time.Duration
+	ApprovalID string // required for INTRUSIVE port scans
+}
+
+// TCPResult reports what a TCP probe found.
+type TCPResult struct {
+	Open   bool
+	Banner string // first bytes the service sent, if any
+}
+
+// commonPortNames maps well-known ports to service names — the netscan
+// module uses this to classify what it finds.
+var commonPortNames = map[int]string{
+	21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns",
+	80: "http", 110: "pop3", 111: "rpcbind", 135: "msrpc", 139: "netbios-ssn",
+	143: "imap", 389: "ldap", 443: "https", 445: "smb",
+	465: "smtps", 587: "submission", 636: "ldaps",
+	993: "imaps", 995: "pop3s", 1080: "socks",
+	1433: "mssql", 1521: "oracle", 2049: "nfs",
+	2375: "docker", 2376: "docker-tls",
+	3306: "mysql", 3389: "rdp", 5432: "postgresql", 5900: "vnc",
+	5984: "couchdb", 6379: "redis", 6443: "kubernetes-api",
+	8080: "http-alt", 8443: "https-alt", 8888: "http-alt2",
+	9200: "elasticsearch", 11211: "memcached",
+	27017: "mongodb", 6379 + 1: "redis-sentinel",
+}
+
+// PortName returns the conventional service name for a port ("" if unknown).
+func PortName(port int) string { return commonPortNames[port] }
+
+// DialTCP runs one TCP probe through the full gauntlet: check scope, pace,
+// execute, log. Every attempt — open, closed, denied, or error — lands in
+// the campaign's request_log (evidence-everything).
+func (e *Engine) DialTCP(ctx context.Context, req *TCPRequest) (*TCPResult, Verdict, error) {
+	v := e.checkTCP(ctx, req)
+	if !v.Allowed {
+		if lerr := e.logTCP(ctx, req, v, "denied:"+v.Reason); lerr != nil {
+			return nil, v, fmt.Errorf("policy: evidence log failed: %w", lerr)
+		}
+		return nil, v, &ErrDenied{Reason: v.Reason}
+	}
+	if err := e.limiter.Wait(ctx, req.Host); err != nil {
+		if lerr := e.logTCP(ctx, req, v, "paced-out:"+err.Error()); lerr != nil {
+			return nil, v, fmt.Errorf("policy: evidence log failed: %w", lerr)
+		}
+		return nil, v, fmt.Errorf("policy: pacing: %w", err)
+	}
+	result, err := e.dialTCP(ctx, req)
+	if err != nil {
+		if lerr := e.logTCP(ctx, req, v, "error:"+err.Error()); lerr != nil {
+			return nil, v, fmt.Errorf("policy: evidence log failed: %w", lerr)
+		}
+		return nil, v, fmt.Errorf("policy: tcp dial: %w", err)
+	}
+	status := "closed"
+	if result.Open {
+		status = fmt.Sprintf("open:%d", req.Port)
+		if result.Banner != "" {
+			status += " banner:" + truncateTCPBanner(result.Banner)
+		}
+	}
+	if lerr := e.logTCP(ctx, req, v, status); lerr != nil {
+		return result, v, fmt.Errorf("policy: evidence log failed: %w", lerr)
+	}
+	return result, v, nil
+}
+
+func (e *Engine) checkTCP(ctx context.Context, req *TCPRequest) Verdict {
+	if !e.scope.InWindow(e.now()) {
+		return Verdict{false, "outside the authorized engagement window", ScopeOut, req.Risk}
+	}
+	if strings.TrimSpace(req.Actor) == "" || strings.TrimSpace(req.Tool) == "" {
+		return Verdict{false, "actor and tool are required for audit attribution", ScopeOut, req.Risk}
+	}
+	if req.Risk == "" || !knownRiskLevels[req.Risk] {
+		return Verdict{false, "request must declare a known risk level", ScopeOut, req.Risk}
+	}
+	if !e.scope.RiskEnabled(req.Risk) {
+		return Verdict{false, fmt.Sprintf("risk level %s is not enabled in policy.risk_levels", req.Risk), ScopeOut, req.Risk}
+	}
+	if req.Risk == RiskIntrusive {
+		if e.approvals == nil {
+			return Verdict{false, "INTRUSIVE actions require the approval gate — none configured", ScopeOut, req.Risk}
+		}
+		if req.ApprovalID == "" {
+			return Verdict{false, "INTRUSIVE actions require an operator approval token", ScopeOut, req.Risk}
+		}
+		if err := e.approvals.ValidateApproval(ctx, req.ApprovalID, req.Tool, req.Host); err != nil {
+			return Verdict{false, "approval rejected: " + err.Error(), ScopeOut, req.Risk}
+		}
+	}
+	sv := e.scope.HostVerdict(req.Host)
+	if sv != ScopeIn {
+		return Verdict{false, fmt.Sprintf("target %s is %s the signed scope", req.Host, scopePhrase(sv)), sv, req.Risk}
+	}
+	return Verdict{true, "", ScopeIn, req.Risk}
+}
+
+// dialTCP makes the actual TCP connection and reads a banner when the port
+// is open. This is the engine's built-in TCP egress — the only place in
+// the codebase where raw sockets are opened (guard-enforced).
+func (e *Engine) dialTCP(ctx context.Context, req *TCPRequest) (*TCPResult, error) {
+	timeout := req.Timeout
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	addr := net.JoinHostPort(req.Host, strconv.Itoa(req.Port))
+	d := net.Dialer{Timeout: timeout}
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		// Connection refused / timeout = closed port, not an error.
+		return &TCPResult{Open: false}, nil
+	}
+	defer conn.Close()
+
+	result := &TCPResult{Open: true}
+	// Try to read a banner — many services send one on connect (SSH,
+	// FTP, SMTP, Redis...). Short deadline; silence is fine (HTTP, TLS).
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 256)
+	n, _ := conn.Read(buf)
+	if n > 0 {
+		result.Banner = strings.TrimSpace(string(buf[:n]))
+	}
+	return result, nil
+}
+
+func (e *Engine) logTCP(ctx context.Context, req *TCPRequest, v Verdict, result string) error {
+	return e.sink.Log(ctx, Entry{
+		TS:         e.now().UTC(),
+		Campaign:   req.Campaign,
+		Actor:      req.Actor,
+		Tool:       req.Tool,
+		Target:     fmt.Sprintf("tcp://%s:%d", req.Host, req.Port),
+		Risk:       req.Risk,
+		Scope:      v.Scope,
+		Allowed:    v.Allowed,
+		Reason:     req.Reason,
+		Result:     result,
+		ApprovedBy: req.ApprovalID,
+	})
+}
+
+func truncateTCPBanner(s string) string {
+	// One line, max 80 chars — enough to identify a service version.
+	for i, r := range s {
+		if r == '\n' || r == '\r' || i >= 80 {
+			return s[:i]
+		}
+	}
+	return s
 }
 
 func scopePhrase(sv ScopeVerdict) string {

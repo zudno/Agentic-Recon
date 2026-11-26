@@ -229,6 +229,40 @@ func (s *Scope) RootDomains() []string {
 	return append([]string(nil), s.domains...)
 }
 
+// CIDRHosts returns the individual IPs covered by the scope's CIDR ranges,
+// up to max. The network scanning module iterates these to discover live
+// hosts (README §8). Network and broadcast addresses are skipped.
+func (s *Scope) CIDRHosts(max int) []string {
+	if max <= 0 {
+		max = 256 // a /24 by default
+	}
+	var hosts []string
+	for _, cidr := range s.cidrs {
+		ones, bits := cidr.Mask.Size()
+		if bits-ones > 16 {
+			continue // ranges larger than /16 are skipped in the native module
+		}
+		for ip := cidr.IP.Mask(cidr.Mask); cidr.Contains(ip) && len(hosts) < max; incIP(ip) {
+			if ip4 := ip.To4(); ip4 != nil {
+				if ip4[3] == 0 || ip4[3] == 255 {
+					continue // skip network and broadcast
+				}
+			}
+			hosts = append(hosts, ip.String())
+		}
+	}
+	return hosts
+}
+
+func incIP(ip net.IP) {
+	for i := len(ip) - 1; i >= 0; i-- {
+		ip[i]++
+		if ip[i] != 0 {
+			break
+		}
+	}
+}
+
 // RiskEnabled reports whether the campaign allows the given risk level.
 func (s *Scope) RiskEnabled(r RiskLevel) bool { return s.risks[r] }
 
