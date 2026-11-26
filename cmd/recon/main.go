@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"agenticrecon/internal/agent"
 	"agenticrecon/internal/pipeline"
 	"agenticrecon/internal/policy"
 	"agenticrecon/internal/store"
@@ -51,6 +52,8 @@ func main() {
 		cmdApprove(os.Args[2:])
 	case "probe-dir":
 		cmdProbeDir(os.Args[2:])
+	case "agents":
+		cmdAgents(os.Args[2:])
 	case "report":
 		// R6: export the engagement report (md/json) from the store.
 		notImplemented("report", "R6")
@@ -560,6 +563,110 @@ func hostOfURL(raw string) string {
 	return strings.ToLower(u.Hostname())
 }
 
+// ─── agents (R5 LLM layer) ─────────────────────────────────────────────────
+
+// cmdAgents routes the LLM-assisted layer: triage (orchestrator) and
+// investigate (specialist ReAct loop). Both require an llm block in the
+// scope; without it, manual triage (recon triage) covers everything.
+func cmdAgents(args []string) {
+	if len(args) == 0 {
+		fatalf("usage: recon agents triage | recon agents investigate <asset-id> --because <reason>")
+	}
+	switch args[0] {
+	case "triage":
+		cmdAgentsTriage(args[1:])
+	case "investigate":
+		cmdAgentsInvestigate(args[1:])
+	default:
+		fatalf("unknown agents command %q (triage | investigate)", args[0])
+	}
+}
+
+// agentsRig loads the shared plumbing for the LLM layer.
+func agentsRig(scopePath, dbPath *string, campaign *int64) (*policy.Scope, *store.Store, *toolbox.Toolbox, int64) {
+	scope, err := policy.Load(*scopePath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	cid := resolveCampaign(nil, st, campaign)
+	eng, err := policy.NewEngine(policy.EngineConfig{Scope: scope, Sink: st.Sink(cid), Approvals: st})
+	if err != nil {
+		fatalf("%v", err)
+	}
+	return scope, st, toolbox.New(scope, eng, st, cid), cid
+}
+
+func cmdAgentsTriage(args []string) {
+	fs := flag.NewFlagSet("agents triage", flag.ContinueOnError)
+	scopePath := fs.String("scope", "scope.yaml", "signed scope contract")
+	dbPath := openStoreFlag(fs)
+	campaign := fs.Int64("campaign", 0, "campaign id (default: latest)")
+	kind := fs.String("kind", "web_service", "asset kind to triage (empty = all)")
+	limit := fs.Int("limit", 20, "maximum assets to review")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	scope, st, tb, cid := agentsRig(scopePath, dbPath, campaign)
+	defer st.Close()
+	client, err := agent.NewClient(scope)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	tri := agent.NewTriageAgent("agent:triage", tb, client, scope)
+	report, err := tri.Run(context.Background(), store.AssetKind(*kind), *limit)
+	if err != nil && !report.Aborted {
+		fatalf("%v", err)
+	}
+	fmt.Fprintf(os.Stderr, "recon: triage reviewed %d — %d promoted, %d discarded, %d skipped (campaign %d)\n",
+		report.Reviewed, report.Promoted, report.Discarded, report.Skipped, cid)
+	if report.Aborted {
+		fatalf("run aborted: %v", err)
+	}
+	fmt.Fprintln(os.Stderr, "  next: recon agents investigate <asset-id> --because <reason>")
+}
+
+func cmdAgentsInvestigate(args []string) {
+	fs := flag.NewFlagSet("agents investigate", flag.ContinueOnError)
+	scopePath := fs.String("scope", "scope.yaml", "signed scope contract")
+	dbPath := openStoreFlag(fs)
+	campaign := fs.Int64("campaign", 0, "campaign id (default: latest)")
+	because := fs.String("because", "", "why this asset matters (required — becomes the hypothesis)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	rest := fs.Args()
+	if len(rest) != 1 || *because == "" {
+		fatalf("usage: recon agents investigate <asset-id> --because <reason>")
+	}
+	assetID, err := strconv.ParseInt(rest[0], 10, 64)
+	if err != nil {
+		fatalf("asset id must be numeric: %v", err)
+	}
+	scope, st, tb, _ := agentsRig(scopePath, dbPath, campaign)
+	defer st.Close()
+	client, err := agent.NewClient(scope)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	spec := agent.NewSpecialistAgent("agent:specialist", tb, client, scope)
+	out, err := spec.Run(context.Background(), agent.Investigation{AssetID: assetID, Reasoning: *because})
+	if err != nil {
+		fatalf("%v", err)
+	}
+	fmt.Fprintf(os.Stderr, "recon: verdict %s (severity %s) after %d step(s)\n", out.Verdict, out.Severity, out.StepsUsed)
+	fmt.Fprintf(os.Stderr, "  %s\n", out.Reasoning)
+	if out.FindingID > 0 {
+		fmt.Fprintf(os.Stderr, "  finding %d — hypothesis %d — evidence %v\n", out.FindingID, out.HypothesisID, out.Evidence)
+	}
+	if out.Verdict == "aborted" {
+		os.Exit(1)
+	}
+}
+
 // ─── misc ──────────────────────────────────────────────────────────────────
 
 func notImplemented(cmd, phase string) {
@@ -584,6 +691,7 @@ Commands:
   triage list|show|mark manual triage over the store — no LLM required       [R3]
   approve list|<token>  the INTRUSIVE approval gate: queue + y/n (auditado) [R4]
   probe-dir            content discovery behind the approval gate            [R4]
+  agents triage|investigate  LLM-assisted triage and specialist loops    [R5]
   report               export the engagement report (md/json)                 [R6]
   version              print the version
 

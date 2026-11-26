@@ -50,25 +50,31 @@ in-scope alternative instead of implementing it.
 
 ## Project status
 
-R0–R4 are landed. R0: skeleton, contract, quality gates. R1: the
+R0–R5 are landed. R0: skeleton, contract, quality gates. R1: the
 deterministic policy engine — scope.yaml validation (authorization.reference
 mandatory, mixed domain+IP exclusions, sources allow-list, risk levels),
 dual token-bucket rate limiter with jitter, and the egress choke point
 (DefaultEgress is the only net/http client — enforced by
-TestNativeEgressOnlyInPolicy). R2: the SQLite store (modernc.org/sqlite,
-pure-Go, CGO_ENABLED=0 intact) — versioned schema, the asset state machine
-with terminal OUT_OF_SCOPE, and the store-backed request_log sink;
-campaigns pause and resume across reopens. R3: the passive pipeline —
-ct-subdomains and http-probe through the engine; `recon run` (scope-hash
-pinned, Ctrl-C pauses), `recon campaigns`, and manual triage
-(list|show|mark) with no LLM. R4: the approval gate and the typed toolbox —
-INTRUSIVE actions need an operator-resolved approval bound to (token, tool,
-host), consumed exactly once per logical action (dir-probe is the R4
-proof); the toolbox catalog adds http_request, fetch_js_and_extract_routes,
-check_cve_details (NVD reference subject — public knowledge, still
-allow-listed), read tools over the store, and hypothesis/finding recording;
-`recon approve list|<token> --yes|--no` and `recon probe-dir` wire it for
-operators. Next: R5, the LLM agents (README §14). Update this file when
+TestNativeEgressOnlyInPolicy, with the single documented exception of the
+LLM client llm.go, which talks to the configured provider only). R2: the
+SQLite store (modernc.org/sqlite, pure-Go, CGO_ENABLED=0 intact) —
+versioned schema, the asset state machine with terminal OUT_OF_SCOPE, and
+the store-backed request_log sink; campaigns pause and resume across
+reopens. R3: the passive pipeline — ct-subdomains and http-probe through
+the engine; `recon run` (scope-hash pinned, Ctrl-C pauses), `recon
+campaigns`, and manual triage (list|show|mark) with no LLM. R4: the
+approval gate and the typed toolbox — INTRUSIVE actions need an
+operator-resolved approval bound to (token, tool, host), consumed exactly
+once per logical action (dir-probe is the R4 proof); `recon approve
+list|<token> --yes|--no` and `recon probe-dir` wire it for operators. R5:
+the LLM layer — a plain-REST client (Anthropic + OpenAI-compatible, stdlib
+net/http in llm.go only, key from the env var named in scope.yaml), the
+triage orchestrator (one bounded call per asset: score + hypothesis +
+state), and the specialist ReAct loop (closed typed-tool catalog, hard
+step + token budgets, evidence-gated conclusions — "validated" without
+evidence gathered this run is discarded); `recon agents triage|investigate`
+wires both. The system remains fully usable with no LLM configured (manual
+triage). Next: R6, the engagement report (README §14). Update this file when
 reality drifts (prefer opencode's `/init` or edit in place).
 
 ---

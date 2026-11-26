@@ -30,6 +30,14 @@ func TestNativeEgressOnlyInPolicy(t *testing.T) {
 			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 				return nil
 			}
+			rel, _ := filepath.Rel(root, path)
+			// The one documented exception: the LLM client (llm.go) talks
+			// only to the configured provider — never to targets — so its
+			// egress is not recon egress and is not engine-gated. Any other
+			// net usage outside policy stays forbidden.
+			if rel == filepath.Join("internal", "agent", "llm.go") {
+				return nil
+			}
 			data, err := os.ReadFile(path)
 			if err != nil {
 				return err
